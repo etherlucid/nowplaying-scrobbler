@@ -19,6 +19,7 @@ else:
 from src import __version__
 from src.config import CONFIG_FILE, load_config, save_config
 from src.listenbrainz import flush_queue, get_queue_count, submit_listen, validate_token
+from src.musicbrainz_matcher import lookup_metadata
 from src.player_detector import get_current_playing_track
 from src.scrobble_engine import ScrobbleEngine
 from src.state_file import read_state
@@ -95,12 +96,27 @@ def cmd_status(args):
         elapsed = track.get("elapsed", 0)
         app_name = track.get("appName", "Music")
 
+        # Resolve MusicBrainz metadata if not already attached
+        if not track.get("recording_mbid"):
+            mb_info = lookup_metadata(token, title, artist, album)
+            if mb_info and mb_info.get("recording_mbid"):
+                track["recording_mbid"] = mb_info["recording_mbid"]
+                track["release_mbid"] = mb_info.get("release_mbid")
+                track["artist_mbids"] = mb_info.get("artist_mbids") or []
+                if not album and mb_info.get("canonical_album"):
+                    album = mb_info["canonical_album"]
+                    track["album"] = album
+
         print(f"{state_icon} Now Playing: {title}")
         print(f"  Artist:     {artist}")
         if album:
             print(f"  Album:      {album}")
         print(f"  Player:     {app_name}")
         print(f"  Position:   {format_time(elapsed)} / {format_time(duration)}")
+        if track.get("recording_mbid"):
+            print(f"  MusicBrainz: Linked ✓ ({track['recording_mbid']})")
+        else:
+            print("  MusicBrainz: Not linked (text metadata only)")
 
         if state:
             pct = state.get("listenProgressPct", 0)
@@ -129,7 +145,19 @@ def cmd_scrobble(args):
         print("No media currently playing.")
         sys.exit(1)
 
+    # Resolve MusicBrainz metadata before scrobbling
+    if not track.get("recording_mbid"):
+        mb_info = lookup_metadata(token, track.get("title", ""), track.get("artist", ""), track.get("album", ""))
+        if mb_info and mb_info.get("recording_mbid"):
+            track["recording_mbid"] = mb_info["recording_mbid"]
+            track["release_mbid"] = mb_info.get("release_mbid")
+            track["artist_mbids"] = mb_info.get("artist_mbids") or []
+            if not track.get("album") and mb_info.get("canonical_album"):
+                track["album"] = mb_info["canonical_album"]
+
     print(f"Submitting scrobble: {track.get('title')} - {track.get('artist')} [{track.get('appName')}]...")
+    if track.get("recording_mbid"):
+        print(f"  ↳ Linked MusicBrainz Recording MBID: {track['recording_mbid']}")
     ok, err = submit_listen(token, track, listened_at=int(time.time()), queue_on_failure=True)
     if ok:
         print("✓ Successfully scrobbled to ListenBrainz!")

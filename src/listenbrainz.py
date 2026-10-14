@@ -7,7 +7,7 @@ from .config import QUEUE_DB, ensure_config_dir
 
 API_BASE = "https://api.listenbrainz.org/1"
 CLIENT_NAME = "nowplaying-scrobbler"
-CLIENT_VERSION = "0.1.0-beta.1"
+CLIENT_VERSION = "0.1.0-beta.2"
 
 def validate_token(token):
     token = (token or "").strip()
@@ -38,21 +38,32 @@ def validate_token(token):
         return False, "", f"Network error: {e}"
 
 def _build_payload(track, listen_type, listened_at=None):
+    album = track.get("album") or track.get("canonical_album") or ""
     metadata = {
         "artist_name": track.get("artist") or "Unknown Artist",
         "track_name": track.get("title") or "Unknown Title",
     }
-    if track.get("album"):
-        metadata["release_name"] = track["album"]
+    if album:
+        metadata["release_name"] = album
 
     additional_info = {
         "submission_client": CLIENT_NAME,
         "submission_client_version": CLIENT_VERSION,
         "media_player": track.get("appName") or "YouTube Music",
+        "music_service_name": track.get("appName") or "YouTube Music",
     }
     dur = track.get("duration")
     if dur and dur > 0:
         additional_info["duration_ms"] = int(round(dur * 1000))
+
+    if track.get("recording_mbid"):
+        additional_info["recording_mbid"] = track["recording_mbid"]
+    if track.get("release_mbid"):
+        additional_info["release_mbid"] = track["release_mbid"]
+    if track.get("artist_mbids"):
+        additional_info["artist_mbids"] = track["artist_mbids"]
+    if track.get("origin_url"):
+        additional_info["origin_url"] = track["origin_url"]
 
     metadata["additional_info"] = additional_info
 

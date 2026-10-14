@@ -3,6 +3,7 @@ import time
 from .config import load_config
 from .listenbrainz import flush_queue, get_queue_count, submit_listen, submit_playing_now
 from .player_detector import get_current_playing_track
+from .musicbrainz_matcher import lookup_metadata
 from .state_file import write_state
 
 def get_track_key(track):
@@ -99,8 +100,33 @@ class ScrobbleEngine:
                     f"New track detected: {track.get('title')} - {track.get('artist')} "
                     f"[{track.get('appName')}] (duration: {track.get('duration')}s)"
                 )
-
-        # 3. If no track is playing
+                # Resolve MusicBrainz metadata
+                try:
+                    mb_info = lookup_metadata(
+                        token,
+                        track.get("title", ""),
+                        track.get("artist", ""),
+                        track.get("album", ""),
+                    )
+                    if mb_info and mb_info.get("recording_mbid"):
+                        track["recording_mbid"] = mb_info["recording_mbid"]
+                        track["release_mbid"] = mb_info.get("release_mbid")
+                        track["artist_mbids"] = mb_info.get("artist_mbids") or []
+                        if not track.get("album") and mb_info.get("canonical_album"):
+                            track["album"] = mb_info["canonical_album"]
+                        self.log(
+                            f"   ↳ MusicBrainz Linked: recording_mbid={track['recording_mbid']} "
+                            f"(Album: {track.get('album', 'None')})"
+                        )
+                except Exception as e:
+                    self.log(f"   ⚠️ MusicBrainz lookup error: {e}")
+        elif track and self.current_track:
+            # Preserve resolved MusicBrainz metadata on subsequent poll ticks
+            for k in ("recording_mbid", "release_mbid", "artist_mbids"):
+                if self.current_track.get(k):
+                    track[k] = self.current_track[k]
+            if not track.get("album") and self.current_track.get("album"):
+                track["album"] = self.current_track["album"]
         if not track:
             status_str = "idle"
             write_state({
