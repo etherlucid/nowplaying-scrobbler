@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+import argparse
+import getpass
+import os
+import signal
+import sys
+import time
+
+# Ensure src/ is importable
+CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
+if os.path.exists(os.path.join(CURRENT_DIR, "src")):
+    if CURRENT_DIR not in sys.path:
+        sys.path.insert(0, CURRENT_DIR)
+else:
+    PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+
+from src import __version__
+from src.config import CONFIG_FILE, load_config, save_config
+from src.listenbrainz import flush_queue, get_queue_count, submit_listen, validate_token
+from src.player_detector import get_current_playing_track
+from src.scrobble_engine import ScrobbleEngine
+from src.state_file import read_state
+
+def format_time(seconds):
+    if seconds is None:
+        return "--:--"
+    m = int(seconds) // 60
+    s = int(seconds) % 60
+    return f"{m}:{s:02d}"
+
+def cmd_auth(args):
+    token = args.token
+    if not token:
+        print("Obtain your user token from: https://listenbrainz.org/profile/")
+        token = input("Enter ListenBrainz User Token: ").strip()
+
+    if not token:
+        print("Error: Token cannot be empty.")
+        sys.exit(1)
+
+    print("Validating token with ListenBrainz API...")
+    valid, username, msg = validate_token(token)
+    if not valid:
+        print(f"❌ Authentication failed: {msg}")
+        sys.exit(1)
+
+    cfg = load_config()
+    cfg["listenbrainz_token"] = token
+    cfg["user_name"] = username
+    save_config(cfg)
+    print(f"✓ Successfully authenticated as: {username}")
+    print(f"  Configuration saved to: {CONFIG_FILE}")
+
+def cmd_status(args):
+    cfg = load_config()
+    token = cfg.get("listenbrainz_token", "").strip()
+    username = cfg.get("user_name", "")
+
+    print(f"nowplaying-scrobbler v{__version__}")
+    print("-" * 40)
+
+    # ListenBrainz Auth Status
+    if token:
+        if username:
+            print(f"ListenBrainz: Connected as @{username} ✓")
+        else:
+            print("ListenBrainz: Token configured (validating...)")
+    else:
+        print("ListenBrainz: Not authenticated (run: nowplaying-scrobbler auth)")
+
+    # Offline Queue
+    q_count = get_queue_count()
+    if q_count > 0:
+        print(f"Offline Queue: {q_count} pending listen(s)")
+    else:
+        print("Offline Queue: 0 pending listens (clean)")
+
+    # Current Track State
+    state = read_state()
+    track = state.get("track") if state else None
+    if not track:
+        # Fallback to direct detection
+        track = get_current_playing_track()
+
+    print("-" * 40)
+    if track:
+        is_playing = track.get("rate", 0) > 0
+        state_icon = "▶" if is_playing else "⏸"
+        title = track.get("title", "Unknown")
+        artist = track.get("artist", "Unknown")
+        album = track.get("album", "")
+        duration = track.get("duration", 0)
+        elapsed = track.get("elapsed", 0)
+        app_name = track.get("appName", "Music")
+
+        print(f"{state_icon} Now Playing: {title}")
+        print(f"  Artist:     {artist}")
+        if album:
+            print(f"  Album:      {album}")
+        print(f"  Player:     {app_name}")
+        print(f"  Position:   {format_time(elapsed)} / {format_time(duration)}")
+
+        if state:
+            pct = state.get("listenProgressPct", 0)
+            target = state.get("scrobbleThresholdPct", 50)
+            scrobbled = state.get("scrobbled", False)
+            if scrobbled:
+                print(f"  Scrobble:   ✓ Scrobbled to ListenBrainz")
+            else:
+                bar_len = 20
+                filled = int((pct / 100.0) * bar_len)
+                bar = "=" * filled + (">" if filled < bar_len else "") + " " * (bar_len - filled - (1 if filled < bar_len else 0))
+                print(f"  Progress:   [{bar}] {round(pct)}% (target: {target}%)")
+    else:
+        print("No active media detected.")
+    print("-" * 40)
+
+def cmd_scrobble(args):
+    cfg = load_config()
+    token = cfg.get("listenbrainz_token", "").strip()
+    if not token:
+        print("Error: No ListenBrainz token configured. Run 'nowplaying-scrobbler auth' first.")
+        sys.exit(1)
+
+    track = get_current_playing_track()
+    if not track:
+        print("No media currently playing.")
+        sys.exit(1)
+
+    print(f"Submitting scrobble: {track.get('title')} - {track.get('artist')} [{track.get('appName')}]...")
+    ok, err = submit_listen(token, track, listened_at=int(time.time()), queue_on_failure=True)
+    if ok:
+        print("✓ Successfully scrobbled to ListenBrainz!")
+    else:
+        print(f"⚠️ Scrobble failed: {err} (queued locally for retry)")
+
+def cmd_flush(args):
+    cfg = load_config()
+    token = cfg.get("listenbrainz_token", "").strip()
+    if not token:
+        print("Error: No ListenBrainz token configured.")
+        sys.exit(1)
+
+    count = get_queue_count()
+    if count == 0:
+        print("Offline queue is empty.")
+        return
+
+    print(f"Flushing {count} queued listen(s)...")
+    flushed = flush_queue(token)
+    print(f"✓ Flushed {flushed} listen(s). Remaining: {get_queue_count()}")
+
+def cmd_run(args):
+    cfg = load_config()
+    token = cfg.get("listenbrainz_token", "").strip()
+    username = cfg.get("user_name", "")
+
+    print(f"nowplaying-scrobbler v{__version__} starting...")
+    if token and username:
+        print(f"Authenticated as: @{username}")
+    elif token:
+        print("Token configured.")
+    else:
+        print("⚠️ Warning: No ListenBrainz token set. Run 'nowplaying-scrobbler auth' to submit listens.")
+
+    def log_handler(msg):
+        t_str = time.strftime("%H:%M:%S")
+        print(f"[{t_str}] {msg}", flush=True)
+
+    engine = ScrobbleEngine(logger=log_handler)
+
+    running = True
+    def sig_handler(sig, frame):
+        nonlocal running
+        print("\nShutting down nowplaying-scrobbler...")
+        running = False
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
+    poll_interval = float(cfg.get("poll_interval_sec", 1.0))
+    print(f"Monitoring media playback (poll interval: {poll_interval}s)...")
+
+    while running:
+        try:
+            engine.tick()
+        except Exception as e:
+            log_handler(f"Error in engine tick: {e}")
+        time.sleep(poll_interval)
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="nowplaying-scrobbler",
+        description="Scrobbler for ListenBrainz supporting YouTube Music Safari PWA & macOS MediaRemote",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    # run (default)
+    run_parser = subparsers.add_parser("run", help="Run the scrobbler daemon in the foreground")
+
+    # auth
+    auth_parser = subparsers.add_parser("auth", help="Authenticate with ListenBrainz User Token")
+    auth_parser.add_argument("token", nargs="?", help="ListenBrainz User Token")
+
+    # status
+    subparsers.add_parser("status", help="Show current media and scrobbler status")
+
+    # scrobble
+    subparsers.add_parser("scrobble", help="Force scrobble the current track immediately")
+
+    # flush
+    subparsers.add_parser("flush", help="Flush the offline queue to ListenBrainz")
+
+    args = parser.parse_args()
+
+    if not args.command or args.command == "run":
+        cmd_run(args)
+    elif args.command == "auth":
+        cmd_auth(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "scrobble":
+        cmd_scrobble(args)
+    elif args.command == "flush":
+        cmd_flush(args)
+
+if __name__ == "__main__":
+    main()
