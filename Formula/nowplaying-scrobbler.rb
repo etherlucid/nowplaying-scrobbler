@@ -2,6 +2,7 @@ class NowplayingScrobbler < Formula
   desc "ListenBrainz scrobbler for YouTube Music Safari PWA and macOS MediaRemote"
   homepage "https://github.com/etherlucid/nowplaying-scrobbler"
   url "https://github.com/etherlucid/nowplaying-scrobbler/archive/refs/tags/v0.1.0-beta.1.tar.gz"
+  sha256 "62eef452c40a3d82de03d865e0500f45395622843f0ca61c70a2770379e14235"
   version "0.1.0-beta.1"
   license "MIT"
   head "https://github.com/etherlucid/nowplaying-scrobbler.git", branch: "main"
